@@ -375,6 +375,62 @@ impl Client {
         })
     }
 
+    pub fn load_components<T: Engine>(
+        &self,
+        containerd_id: impl ToString,
+        engine: &T,
+    ) -> Result<(Vec<oci::WasmLayer>, Platform)> {
+        let container = self.get_container(containerd_id.to_string())?;
+        let mut image = self.get_image(container.image)?;
+        log::info!("    xxx SHIM: image: {:?}", image.name);
+
+        let manifest = ImageManifest::from_reader(
+            self.read_content(self.extract_image_content_sha(&image)?)?
+                .as_slice(),
+        )?;
+
+        let image_config = self.read_content(manifest.config().digest())?;
+
+        // the only part we care about here is the platform values
+        let platform: Platform = serde_json::from_slice(&image_config)?;
+        let Arch::Wasm = platform.architecture() else {
+            log::info!("manifest is not in WASM OCI image format");
+            return Ok((vec![], platform));
+        };
+
+        log::info!("found manifest with WASM OCI image format.");
+        let mut res = Vec::new();
+
+        // At this point, this is definitely an OCI reference that contains Wasm. Proposed
+        // algorithm:
+        //  * collect the supported layers
+        //  * check if any layer is already precompiled (is a label for it present in the
+        //  containerd content store?) (additional optimization of only checking actual wasm
+        //  content, not static assets; not easily generalizable for other shims)
+        //  * if yes, add it to the final layer slice
+        //  * if no, add it to a layer slice that needs to be precompiled
+        //  * precompile all layers that need it
+        //  * add them to the containerd content store, with labels and GC refs
+        //  * return
+        //
+        //  An issue here for Spin apps is that we want two things at the same time from runwasi:
+        //      * runwasi to return *all* layers present in an OCI image
+        //      * only precompile and store wasm content
+        //  This seems difficult with the supported_layers_types function from the engine trait.
+
+        for cfg in manifest.layers().clone() {
+            log::trace!("      <<< Layer: {:?}: {}", cfg.media_type(), cfg.digest());
+            if is_supported_layer(cfg.media_type(), T::supported_layers_types()) {
+                res.push(WasmLayer {
+                    config: cfg.clone(),
+                    layer: self.read_content(cfg.digest())?,
+                });
+            }
+        }
+
+        Ok((res, platform))
+    }
+
     // load module will query the containerd store to find an image that has an OS of type 'wasm'
     // If found it continues to parse the manifest and return the layers that contains the WASM modules
     // and possibly other configuration layers.
@@ -385,6 +441,7 @@ impl Client {
     ) -> Result<(Vec<oci::WasmLayer>, Platform)> {
         let container = self.get_container(containerd_id.to_string())?;
         let mut image = self.get_image(container.image)?;
+        log::info!("    xxx SHIM: image: {:?}", image.name);
         let image_digest = self.extract_image_content_sha(&image)?;
         let manifest = self.read_content(image_digest.clone())?;
         let manifest = manifest.as_slice();
@@ -432,10 +489,18 @@ impl Client {
             _ => {}
         }
 
+        for l in manifest.layers().clone() {
+            log::info!(
+                "                   XXX SHIM: {:?}: {}",
+                l.media_type(),
+                l.digest()
+            );
+        }
+
         let layers = manifest
             .layers()
             .iter()
-            .filter(|x| is_wasm_layer(x.media_type(), T::supported_layers_types()))
+            .filter(|x| is_supported_layer(x.media_type(), T::supported_layers_types()))
             .map(|config| self.read_content(config.digest()))
             .collect::<Result<Vec<_>>>()?;
 
@@ -493,7 +558,7 @@ fn precompile_label(name: &str, version: &str) -> String {
     format!("{}/{}/{}", PRECOMPILE_PREFIX, name, version)
 }
 
-fn is_wasm_layer(media_type: &MediaType, supported_layer_types: &[&str]) -> bool {
+fn is_supported_layer(media_type: &MediaType, supported_layer_types: &[&str]) -> bool {
     supported_layer_types.contains(&media_type.to_string().as_str())
 }
 

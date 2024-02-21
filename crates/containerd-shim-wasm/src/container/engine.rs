@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 
 use super::Source;
 use crate::container::{PathResolve, RuntimeContext};
+use crate::sandbox::oci::WasmLayer;
 use crate::sandbox::Stdio;
 
 pub trait Engine: Clone + Send + Sync + 'static {
@@ -59,6 +60,10 @@ pub trait Engine: Clone + Send + Sync + 'static {
     /// The cached, precompiled module will be reloaded on subsequent runs.
     fn precompile(&self, _layers: &[Vec<u8>]) -> Result<Vec<u8>> {
         bail!("precompilation not supported for this runtime")
+    }
+
+    fn precompile_wasm(&self, _layers: &[WasmLayer]) -> Result<Vec<WasmLayer>> {
+        bail!("precompilation not supoprted")
     }
 
     /// Can_precompile lets the shim know if the runtime supports precompilation.
